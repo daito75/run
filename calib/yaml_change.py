@@ -6,11 +6,7 @@ import cv2
 
 # 変換したいファイルのパターンを指定（例：全カメラ）
 GLOBS = [
-    r"D:\BRLAB\2025\mizuno\done\calib\cam1\cam1_1080p.yaml",
-    r"D:\BRLAB\2025\mizuno\done\calib\cam2\cam2_1080p.yaml",
-    r"D:\BRLAB\2025\mizuno\done\calib\cam3\cam3_1080p.yaml",
-    r"D:\BRLAB\2025\mizuno\done\calib\cam4\cam4_1080p.yaml",
-    r"D:\BRLAB\2025\mizuno\done\calib\cam5\cam5_1080p.yaml",
+    r"D:\BRLAB\2025\mizuno\done\deta\kaiseki3\frame\cam1\cam1_1080p.yaml",
 ]
 
 def looks_like_opencv_yaml(path: str) -> bool:

@@ -1,44 +1,59 @@
 # extract_pairs_multi.py
-import cv2, os
+import cv2, os, argparse
 
-# ここにキャリブ用チェス動画を並べる（Cam1が基準）
-cams = [
-    {"name": "cam1", "video": r"D:\BRLAB\2025\mizuno\done\deta\kaiseki2\chess\cam1_chess.mp4"},
-    {"name": "cam2", "video": r"D:\BRLAB\2025\mizuno\done\deta\kaiseki2\chess\cam2_chess.mp4"},
-    {"name": "cam3", "video": r"D:\BRLAB\2025\mizuno\done\deta\kaiseki2\chess\cam3_chess.mp4"},
-    # 追加例:
-    # {"name":"cam3", "video": r"...\cam3.mp4"},
-]
+def parse_cam_ids(s: str):
+    ids = []
+    for part in s.split(","):
+        part = part.strip()
+        if "-" in part:
+            a,b = part.split("-",1)
+            ids += list(range(int(a), int(b)+1))
+        else:
+            ids.append(int(part))
+    return sorted(set(ids))
 
-out_root = r"D:\BRLAB\2025\mizuno\done\deta\kaiseki2\frame"
-interval_sec = 1.0  # ← ここを 0.5 とかにすれば0.5秒刻み
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--kaiseki", type=int, required=True)
+    ap.add_argument("--cam-ids", type=str, required=True)  # 例 "1-3,5"
+    ap.add_argument("--root", required=True)
+    ap.add_argument("--interval-sec", type=float, default=1.0)
+    args, _ = ap.parse_known_args()
 
-os.makedirs(out_root, exist_ok=True)
+    k = args.kaiseki
+    cam_ids = parse_cam_ids(args.cam-ids if hasattr(args, "cam-ids") else args.cam_ids)  # safety
+    root = args.root.rstrip("\\/")
+    interval_sec = args.interval_sec
 
-for c in cams:
-    name, path = c["name"], c["video"]
-    cap = cv2.VideoCapture(path)
-    assert cap.isOpened(), f"open fail: {path}"
+    out_root = rf"{root}\kaiseki{k}\frame"
+    os.makedirs(out_root, exist_ok=True)
+    print(f"[INFO] kaiseki{k}, cam_ids={cam_ids}, out={out_root}, interval={interval_sec}s")
 
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-    dur_sec = total / fps if fps > 0 else 0
-    os.makedirs(os.path.join(out_root, name), exist_ok=True)
+    for i in cam_ids:
+        name = f"cam{i}"
+        path = rf"{root}\kaiseki{k}\chess\{name}_chess.mp4"
+        cap = cv2.VideoCapture(path)
+        assert cap.isOpened(), f"open fail: {path}"
 
-    saved = 0
-    t = 0.0
-    while t <= dur_sec + 1e-6:
-        cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000.0)
-        ok, frame = cap.read()
-        if not ok:
-            # set直後に落ちる環境対策でワンモアトライ
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        dur_sec = total / fps if fps > 0 else 0.0
+
+        out_dir = rf"{out_root}\{name}"
+        os.makedirs(out_dir, exist_ok=True)
+
+        saved = 0; t = 0.0
+        while t <= dur_sec + 1e-6:
+            cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000.0)
             ok, frame = cap.read()
-        if ok:
-            # ファイル名は “秒” ベースで揃える（000000, 000001, ...）
-            fname = f"{int(round(t)):06d}.png"
-            cv2.imwrite(os.path.join(out_root, name, fname), frame)
-            saved += 1
-        t += interval_sec
+            if not ok: ok, frame = cap.read()
+            if ok:
+                fname = f"{int(round(t)):06d}.png"
+                cv2.imwrite(os.path.join(out_dir, fname), frame); saved += 1
+            t += interval_sec
 
-    cap.release()
-    print(f"[done] {name}: fps≈{fps:.2f}, dur≈{dur_sec:.2f}s -> saved={saved}")
+        cap.release()
+        print(f"[done] {name}: fps≈{fps:.2f}, dur≈{dur_sec:.2f}s -> saved={saved}")
+
+if __name__ == "__main__":
+    main()

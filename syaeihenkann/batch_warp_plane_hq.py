@@ -9,26 +9,28 @@ HQ version: YAML(K,D) + 歩行動画 → (ArUco複数フレーム) → 実世界
 - warp: Lanczos4, 必要に応じてスーパーサンプリング→AREAダウンサンプル
 
 python D:\BRLAB\2025\mizuno\done\run\syaeihenkann\batch_warp_plane_hq.py `
-  --pair "D:\BRLAB\2025\mizuno\done\deta\kaiseki2\frame\cam1\cam1_1080p.yaml|D:\BRLAB\2025\mizuno\done\deta\kaiseki2\walk\cam1_walk.mp4|D:\BRLAB\2025\mizuno\done\deta\kaiseki2\syaeihenkann\a0.3\cam1_on_plane.mp4" `
+  --pair "D:\BRLAB\2025\mizuno\done\deta\kaiseki3\frame\cam1\cam1_1080p.yaml|D:\BRLAB\2025\mizuno\done\deta\kaiseki3\walk\cam1_walk.mp4|D:\BRLAB\2025\mizuno\done\deta\kaiseki3\syaeihenkann\a1.0\cam1_on_plane.mp4" `
   --dict 4X4_50 `
   --fisheye `
   --marker-size-cm 14.5 `
   --px-per-m 200 `
-  --alpha 0.3 `
+  --alpha 1.0 `
   --scan-step 1 `
   --scan-max 2000 `
   --candidates-top 30 `
   --reproj-thresh-px 2.0 `
   --superres 1.25 `
-  --debug-dir D:\BRLAB\2025\mizuno\done\deta\kaiseki2\syaeihenkann\ninsiki\a0.3 `
+  --debug-dir D:\BRLAB\2025\mizuno\done\deta\kaiseki3\syaeihenkann\ninsiki\a1.0 `
   --save-best-k 5 `
   --calib-size 1920x1080 `
   --select-detect-roi `
   --select-roi-frame 100 `
   --expected-id 0 `
-  --quiet
+  --auto-upright `
+  --upright-edge 01 `
+  --board-layout "D:\BRLAB\2025\mizuno\done\run\syaeihenkann\board-layout.yml" `
+  --quiet `
   --crop-roi `
-
 """
 
 import argparse
@@ -230,11 +232,11 @@ def adjust_K_for_crop(K: np.ndarray, roi: Tuple[int, int, int, int]) -> np.ndarr
 
 def undistort_with_maps(img: np.ndarray, map1, map2) -> np.ndarray: #キャリブレーション結果のmapを使って、元フレームを補正し、精度優先の補間で再構成する
     return cv2.remap(
-        img,
-        map1,
-        map2,
-        interpolation=cv2.INTER_LANCZOS4,
-        borderMode=cv2.BORDER_CONSTANT,
+        img, #入力フレーム(1枚)
+        map1, #事前計算した歪み補正マップ
+        map2, 
+        interpolation=cv2.INTER_LANCZOS4, #補間方法
+        borderMode=cv2.BORDER_CONSTANT, #画像の外を参照したらどうするか
     )  #精度優先ならINTER_LANCZOS4, 速度優先ならINTER_LINEAR
 
 
@@ -532,34 +534,45 @@ def estimate_H_from_video_hq(
         if ids is None or len(ids) == 0:
             continue
 
-    #画像点/物体点をまとめて作成（1枚でも複数でもOK）
         imgp_list, objp_list = [], []
         for i, idv in enumerate(ids.reshape(-1)):
             pts = corners[i].reshape(-1,2).astype(np.float32)
 
-        #小さすぎるマーカーは除外
+            # 小さすぎるマーカー除外
             side_lens = np.linalg.norm(np.roll(pts, -1, axis=0) - pts, axis=1)
             if float(np.min(side_lens)) < 40.0:
                 continue
 
-        #サブピクセル（元座標系で）
+            # サブピクセルで締める
             pts_ref = corner_subpix_refine(gray_full, [pts], win=(9,9), iters=300, eps=1e-6)[0].astype(np.float32)
             imgp_list.append(pts_ref.reshape(-1,1,2))
 
-        #「同一サイズの正方形」運用（ボード配置があるならIDごとに3D座標を変える）
-            obj_c3d = np.array([
-                [0,0,0],
-                [marker_size_m,0,0],
-                [marker_size_m,marker_size_m,0],
-                [0,marker_size_m,0]
-            ], np.float32)
-            objp_list.append(obj_c3d.reshape(-1,1,3))
+            # ★ board_layout を使う（m単位）
+            if board_layout is not None:
+                wc = board_corners_world(int(idv), board_layout)  # (4,3) or None
+                if wc is None:
+                    wc = np.array([
+                        [0,0,0],
+                        [marker_size_m,0,0],
+                        [marker_size_m,marker_size_m,0],
+                        [0,marker_size_m,0]
+                        ], np.float32)
+            else:
+                wc = np.array([
+                    [0,0,0],
+                    [marker_size_m,0,0],
+                    [marker_size_m,marker_size_m,0],
+                    [0,marker_size_m,0]
+                ], np.float32)
+
+            objp_list.append(wc.reshape(-1,1,3))
 
         if len(imgp_list) == 0:
             continue
 
-        imgp = np.concatenate(imgp_list, axis=0)  #Nx1x2
-        objp = np.concatenate(objp_list, axis=0)  #Nx1x3
+        imgp = np.concatenate(imgp_list, axis=0)  # Nx1x2
+        objp = np.concatenate(objp_list, axis=0)  # Nx1x3
+
 
         ok = False; rvec=None; tvec=None; err=1e9
 
@@ -784,7 +797,8 @@ def process_one_pair_hq(
         save_best_k=save_best_k,
         roi=roi if use_roi else None,
         detect_roi=detect_roi,     #← これ！
-        expected_id=expected_id
+        expected_id=expected_id,
+        board_layout=board_layout,
     )
 
     if auto_upright:
@@ -959,10 +973,15 @@ def main():
                 help="マーカーの指定辺を水平に回す（出力平面の自動水平化）")
     ap.add_argument("--upright-edge", default="01", choices=["01", "12", "23", "30"],
                 help="水平化に使うマーカー辺（TL=0,TR=1,BR=2,BL=3）。例: 01=上辺、12=右辺")
+    ap.add_argument("--board-layout", default="",
+    help="共通平面座標系のレイアウトYAML（cx,cy,size[m]）")
+
 
 
     args = ap.parse_args()
     set_opencv_quiet(args.quiet)
+
+    layout = load_board_layout(args.board_layout) if args.board_layout else None
 
     pairs = parse_pairs(args.pair)
     debug_dir = Path(args.debug_dir) if args.debug_dir else None
@@ -985,7 +1004,8 @@ def main():
                     select_roi_frame=args.select_roi_frame,
                     expected_id=args.expected_id,
                     auto_upright=args.auto_upright,
-                    upright_edge=args.upright_edge
+                    upright_edge=args.upright_edge,
+                    board_layout=layout 
                 ))
             for j in futures.as_completed(jobs):
                 print(j.result())
@@ -1003,7 +1023,9 @@ def main():
                 select_detect_roi=args.select_detect_roi,
                 expected_id=args.expected_id,
                 auto_upright=args.auto_upright,
-                upright_edge=args.upright_edge
+                upright_edge=args.upright_edge,
+                board_layout=layout 
+                
             )
             print(msg)
 

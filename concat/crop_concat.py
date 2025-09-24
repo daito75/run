@@ -1,97 +1,132 @@
-import cv2, json, os
+# crop_concat.py
+import cv2, json, os, argparse
 import numpy as np
 
-roi_json = r"D:\BRLAB\2025\mizuno\done\deta\kaiseki2\concat\a0.1\roi_config.json"
-out_video = r"D:\BRLAB\2025\mizuno\done\deta\kaiseki2\concat\a0.1\walk_concat_roi.mp4"
+def parse_cam_ids(s: str):
+    ids = []
+    for part in s.split(","):
+        part = part.strip()
+        if "-" in part:
+            a,b = part.split("-",1)
+            ids.extend(range(int(a), int(b)+1))
+        else:
+            ids.append(int(part))
+    out = []
+    for x in ids:
+        if x not in out:
+            out.append(x)
+    return out
 
-# オフセット（秒）で微同期させたいとき
-offset_sec = {
-    "camA": 0.0,
-    "camB": 0.0,
-}
+def parse_offset_map(s: str):
+    # "1:0,3:0.5" -> {"cam1":0.0, "cam3":0.5}
+    out = {}
+    if not s: return out
+    for tok in s.split(","):
+        tok = tok.strip()
+        if not tok: continue
+        k,v = tok.split(":",1)
+        out[f"cam{int(k)}"] = float(v)
+    return out
 
-# 出力高さ（両動画ともこの高さにスケール）
-target_height = 480  # 360～720くらいが扱いやすい
+def open_writer_with_fallback(path_mp4, fps, size_wh):
+    fourccs = [("mp4v",".mp4"), ("avc1",".mp4"), ("H264",".mp4"), ("XVID",".avi"), ("MJPG",".avi")]
+    base, ext0 = os.path.splitext(path_mp4)
+    for four, ext in fourccs:
+        outp = base+ext
+        w = cv2.VideoWriter(outp, cv2.VideoWriter_fourcc(*four), float(fps), size_wh)
+        if w.isOpened():
+            return w, outp, four
+    raise RuntimeError("VideoWriterを開けませんでした")
 
-with open(roi_json, "r", encoding="utf-8") as f:
-    cfg = json.load(f)
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--kaiseki", type=int, required=True)
+    ap.add_argument("--cam-ids", type=str, required=True, help='例 "1-3,5"（順序=並び順）')
+    ap.add_argument("--a", type=str, required=True)
+    ap.add_argument("--root", type=str, required=True)
+    ap.add_argument("--target-height", type=int, default=480)
+    ap.add_argument("--offset-sec", default="", help='例 "1:0,3:0.5"')
+    args = ap.parse_args()
 
-# 並べる順番（JSONの順を守りたい場合はここで指定）
-order = list(cfg.keys())  # ["camA","camB"]
-caps = {}
-infos = {}
+    cam_ids = parse_cam_ids(args.cam_ids)
+    a_dir = f"a{args.a}"
+    roi_json = rf"{args.root}\kaiseki{args.kaiseki}\concat\{a_dir}\roi_config.json"
+    out_video = rf"{args.root}\kaiseki{args.kaiseki}\concat\{a_dir}\walk_concat_roi.mp4"
 
-for name in order:
-    path = cfg[name]["path"]
-    roi  = cfg[name]["roi"]  # dict: x,y,w,h
-    cap = cv2.VideoCapture(path)
-    assert cap.isOpened(), f"開けない: {path}"
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    # オフセットを反映
-    cap.set(cv2.CAP_PROP_POS_FRAMES, int(round(offset_sec.get(name,0.0)*fps)))
-    caps[name] = cap
-    infos[name] = {"fps": fps, "roi": roi}
+    with open(roi_json, "r", encoding="utf-8") as f:
+        cfg = json.load(f)
 
-# 出力fpsは最小に合わせる
-fps_out = min(infos[n]["fps"] for n in order)
+    # 並び順（cam-ids の順に限定）
+    order = [f"cam{cid}" for cid in cam_ids if f"cam{cid}" in cfg]
+    assert order, "roi_config.jsonに対象カメラが見つかりません"
 
-# 最初のフレームで幅計算
-frames0 = []
-for name in order:
-    cap = caps[name]
-    ok, frame = cap.read()
-    assert ok, f"先頭フレーム取得失敗: {name}"
-    # 一度読み出したのでバックしておく
-    cap.set(cv2.CAP_PROP_POS_FRAMES, max(cap.get(cv2.CAP_PROP_POS_FRAMES)-1,0))
-    r = infos[name]["roi"]
-    x,y,w,h = r["x"], r["y"], r["w"], r["h"]
-    crop = frame[y:y+h, x:x+w]
-    scale = target_height / h
-    new_w = int(round(w * scale))
-    frames0.append((new_w, target_height))
+    # オフセット
+    offset_map = parse_offset_map(args.offset_sec)
 
-# 出力サイズ（横は合計）
-W_out = sum(w for w,h in frames0)
-H_out = target_height
+    caps = {}
+    infos = {}
+    for name in order:
+        path = cfg[name]["path"]
+        roi  = cfg[name]["roi"]
+        cap = cv2.VideoCapture(path)
+        assert cap.isOpened(), f"開けない: {path}"
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        # オフセット適用
+        off = float(offset_map.get(name, 0.0))
+        if off != 0.0:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, int(round(off*fps)))
+        caps[name] = cap
+        infos[name] = {"fps": fps, "roi": roi}
 
-os.makedirs(os.path.dirname(out_video), exist_ok=True)
-fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-writer = cv2.VideoWriter(out_video, fourcc, fps_out, (W_out, H_out))
-if not writer.isOpened():
-    out_video = out_video[:-4] + ".avi"
-    writer = cv2.VideoWriter(out_video, cv2.VideoWriter_fourcc(*"XVID"), fps_out, (W_out, H_out))
-    assert writer.isOpened(), "出力作成に失敗"
+    fps_out = min(infos[n]["fps"] for n in order)
 
-frames = 0
-while True:
-    row = []
+    # 最初のフレームで出力幅を計算
+    frames0 = []
     for name in order:
         cap = caps[name]
-        ok, frame = cap.read()
-        if not ok:
-            row = None
-            break
-        r = infos[name]["roi"]
-        x,y,w,h = r["x"], r["y"], r["w"], r["h"]
-        crop = frame[y:y+h, x:x+w]
-        # 高さ基準でリサイズ（アスペクト保持）
-        scale = target_height / h
+        ok, frame = cap.read(); assert ok, f"先頭フレーム取得失敗: {name}"
+        cap.set(cv2.CAP_PROP_POS_FRAMES, max(cap.get(cv2.CAP_PROP_POS_FRAMES)-1,0))
+        r = infos[name]["roi"]; x,y,w,h = r["x"], r["y"], r["w"], r["h"]
+        scale = args.target_height / h
         new_w = int(round(w * scale))
-        resized = cv2.resize(crop, (new_w, target_height), interpolation=cv2.INTER_LINEAR)
-        row.append(resized)
-    if row is None:
-        break
-    # 横に連結
-    strip = cv2.hconcat(row)
-    # 念のためサイズを最終合わせ
-    if (strip.shape[1], strip.shape[0]) != (W_out, H_out):
-        strip = cv2.resize(strip, (W_out, H_out), interpolation=cv2.INTER_LINEAR)
-    writer.write(strip)
-    frames += 1
-    if frames == 1:
-        cv2.imwrite(os.path.join(os.path.dirname(out_video), "_debug_first.jpg"), strip)
+        frames0.append((new_w, args.target_height))
 
-for cap in caps.values():
-    cap.release()
-writer.release()
-print("saved:", out_video, "frames:", frames, "size:", (W_out, H_out))
+    W_out = sum(w for w,h in frames0)
+    H_out = args.target_height
+
+    os.makedirs(os.path.dirname(out_video), exist_ok=True)
+    writer, used_path, used_four = open_writer_with_fallback(out_video, fps_out, (W_out, H_out))
+    print(f"[writer] {used_four} -> {used_path} size={W_out}x{H_out} fps={fps_out:.3f}")
+
+    frames = 0
+    while True:
+        row = []
+        for name in order:
+            cap = caps[name]
+            ok, frame = cap.read()
+            if not ok:
+                row = None
+                break
+            r = infos[name]["roi"]; x,y,w,h = r["x"], r["y"], r["w"], r["h"]
+            crop = frame[y:y+h, x:x+w]
+            scale = args.target_height / h
+            new_w = int(round(w * scale))
+            resized = cv2.resize(crop, (new_w, args.target_height), interpolation=cv2.INTER_LINEAR)
+            row.append(resized)
+        if row is None:
+            break
+        strip = cv2.hconcat(row)
+        if (strip.shape[1], strip.shape[0]) != (W_out, H_out):
+            strip = cv2.resize(strip, (W_out, H_out), interpolation=cv2.INTER_LINEAR)
+        writer.write(strip)
+        frames += 1
+        if frames == 1:
+            cv2.imwrite(os.path.join(os.path.dirname(used_path), "_debug_first.jpg"), strip)
+
+    for cap in caps.values():
+        cap.release()
+    writer.release()
+    print("saved:", used_path, "frames:", frames, "size:", (W_out, H_out))
+
+if __name__ == "__main__":
+    main()
