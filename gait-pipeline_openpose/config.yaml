@@ -1,0 +1,29 @@
+in_video: "/mnt/d/BRLAB/2025/mizuno/done/deta/kaiseki4/concat/3.0m/60cm.mp4"
+out_dir:  "/mnt/d/BRLAB/2025/mizuno/done/deta/kaiseki4/openpose/3.0m/60cm"
+
+openpose:
+  bin: "/home/daito/src/openpose/build/examples/openpose/openpose.bin"
+  model_folder: "/home/daito/src/openpose/models"
+  model_pose: "BODY_25"
+  net_resolution: "656x368"
+  render_pose: 2
+  number_people_max: 1
+  num_gpu: 1
+  num_gpu_start: 0
+  display: 0
+  write_overlay_name: "mywalk_pose_overlay.mp4"
+  write_json_subdir: "json"
+  logging_level: 255
+  scale_number: 2
+  scale_gap: 0.25
+
+analysis:
+  conf_th: 0.3
+  speed_th: 3.0
+  min_hold: 4
+  scale_m_per_px: 0.005
+  overlay_out_subdir: "gaitevents"
+
+pipeline:
+  skip_openpose_if_json_exists: true
+  force_openpose: true

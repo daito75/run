@@ -1,0 +1,15 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+        "label": "Run Gait Pipeline",
+        "type": "shell",
+        "command": "bash -ic '. .venv/bin/activate && python run_gait_pipeline.py'",
+        "problemMatcher": [],
+        "group": {
+            "kind": "build",
+            "isDefault": true
+        }
+    }
+]
+}
