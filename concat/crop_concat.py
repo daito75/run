@@ -1,6 +1,7 @@
 # crop_concat.py
 import cv2, json, os, argparse
 import numpy as np
+from pathlib import Path
 
 def parse_cam_ids(s: str):
     ids = []
@@ -30,7 +31,7 @@ def parse_offset_map(s: str):
 
 def open_writer_with_fallback(path_mp4, fps, size_wh):
     fourccs = [("mp4v",".mp4"), ("avc1",".mp4"), ("H264",".mp4"), ("XVID",".avi"), ("MJPG",".avi")]
-    base, ext0 = os.path.splitext(path_mp4)
+    base, ext0 = os.path.splitext(str(path_mp4))
     for four, ext in fourccs:
         outp = base+ext
         w = cv2.VideoWriter(outp, cv2.VideoWriter_fourcc(*four), float(fps), size_wh)
@@ -39,36 +40,50 @@ def open_writer_with_fallback(path_mp4, fps, size_wh):
     raise RuntimeError("VideoWriterを開けませんでした")
 
 def main():
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(description="ROIクロップ→横並び結合（α廃止・入出力柔軟化）")
     ap.add_argument("--kaiseki", type=int, required=True)
     ap.add_argument("--cam-ids", type=str, required=True, help='例 "1-3,5"（順序=並び順）')
-    ap.add_argument("--a", type=str, required=True)
     ap.add_argument("--root", type=str, required=True)
     ap.add_argument("--target-height", type=int, default=480)
     ap.add_argument("--offset-sec", default="", help='例 "1:0,3:0.5"')
+
+    # ★ 新規：出力場所
+    ap.add_argument("--out-dir", default="", help="出力フォルダ（未指定なら既定パス）")
+        # ★ 新規：入力マップ（受け取るだけ）
+    ap.add_argument("--in-map", default="", help="カメラID→動画パスの明示指定（未使用でもOK）")
+
+
     args = ap.parse_args()
 
     cam_ids = parse_cam_ids(args.cam_ids)
-    a_dir = f"a{args.a}"
-    roi_json = rf"{args.root}\kaiseki{args.kaiseki}\concat\{a_dir}\roi_config.json"
-    out_video = rf"{args.root}\kaiseki{args.kaiseki}\concat\{a_dir}\walk_concat_roi.mp4"
+    order = [f"cam{cid}" for cid in cam_ids]
+
+    # ===== ROI設定ファイルの場所 =====
+    if args.out_dir:
+        base_dir = Path(args.out_dir).resolve()
+    else:
+        base_dir = Path(args.root) / f"kaiseki{args.kaiseki}" / "concat"
+    base_dir.mkdir(parents=True, exist_ok=True)
+
+    roi_json = base_dir / "roi_config.json"
+    out_video = base_dir / "walk_concat_roi.mp4"
 
     with open(roi_json, "r", encoding="utf-8") as f:
         cfg = json.load(f)
 
-    # 並び順（cam-ids の順に限定）
-    order = [f"cam{cid}" for cid in cam_ids if f"cam{cid}" in cfg]
+    order = [n for n in order if n in cfg]
     assert order, "roi_config.jsonに対象カメラが見つかりません"
 
     # オフセット
     offset_map = parse_offset_map(args.offset_sec)
 
+    # ===== 入力オープン =====
     caps = {}
     infos = {}
     for name in order:
         path = cfg[name]["path"]
         roi  = cfg[name]["roi"]
-        cap = cv2.VideoCapture(path)
+        cap = cv2.VideoCapture(str(path))
         assert cap.isOpened(), f"開けない: {path}"
         fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
         # オフセット適用
@@ -80,7 +95,7 @@ def main():
 
     fps_out = min(infos[n]["fps"] for n in order)
 
-    # 最初のフレームで出力幅を計算
+    # ===== 出力サイズ算出 =====
     frames0 = []
     for name in order:
         cap = caps[name]
@@ -94,10 +109,10 @@ def main():
     W_out = sum(w for w,h in frames0)
     H_out = args.target_height
 
-    os.makedirs(os.path.dirname(out_video), exist_ok=True)
     writer, used_path, used_four = open_writer_with_fallback(out_video, fps_out, (W_out, H_out))
     print(f"[writer] {used_four} -> {used_path} size={W_out}x{H_out} fps={fps_out:.3f}")
 
+    # ===== メインループ =====
     frames = 0
     while True:
         row = []
@@ -121,7 +136,7 @@ def main():
         writer.write(strip)
         frames += 1
         if frames == 1:
-            cv2.imwrite(os.path.join(os.path.dirname(used_path), "_debug_first.jpg"), strip)
+            cv2.imwrite(str(Path(base_dir) / "_debug_first.jpg"), strip)
 
     for cap in caps.values():
         cap.release()

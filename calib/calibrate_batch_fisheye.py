@@ -1,3 +1,6 @@
+#良フレームのチェスボードからキャリブレーションによりyamlファイルの取得
+#魚眼レンズ専用のコード
+
 import os, glob, yaml, numpy as np, cv2, argparse
 
 def parse_cam_ids(s: str):

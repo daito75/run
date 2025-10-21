@@ -1,9 +1,9 @@
 # undistort_video_hq.py
 import os, cv2, yaml, numpy as np
 
-IN_MP4  = r"D:\BRLAB\2025\mizuno\done\deta\kaiseki3\walk\cam3_walk.mp4"
-OUT_MP4 = r"D:\BRLAB\2025\mizuno\done\deta\kaiseki3\yugamihosei\cam3_walk_hosei.mp4"
-CALIB   = r"D:\BRLAB\2025\mizuno\done\deta\kaiseki3\frame\cam3\cam3_1080p.yaml"
+IN_MP4  = r"D:\BRLAB\2025\mizuno\done\deta\kaiseki2\walk\cam1_walk.mp4"
+OUT_MP4 = r"D:\BRLAB\2025\mizuno\done\deta\kaiseki2\syaeihenkann\a75\cam1_on_plane.mp4"
+CALIB   = r"D:\BRLAB\2025\mizuno\done\deta\kaiseki2\frame\cam1\cam1_1080p.yaml"
 
 # 設定
 ALPHA = 0.7          # 0..1（0で強めにトリミング、1で黒縁許容して広く）

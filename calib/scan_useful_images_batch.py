@@ -1,4 +1,5 @@
 # scan_useful_images_batch.py
+#フレームごとの画像を保存して，チェスボードがしっかりと認識しているものと，していないものとも区別している
 import cv2, glob, os, shutil, argparse
 import numpy as np
 from skimage.metrics import structural_similarity as ssim

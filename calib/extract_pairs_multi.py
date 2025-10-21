@@ -1,4 +1,5 @@
 # extract_pairs_multi.py
+#動画をフレームごとに画像として保存しています
 import cv2, os, argparse
 
 def parse_cam_ids(s: str):
