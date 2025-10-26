@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-#cd /mnt/d/BRLAB/2025/mizuno/gait-pipeline_openpose
+#cd /mnt/c/brlab//2025/mizuno/run-main/gait-pipeline_openpose
 #実行python3 run_openpose_pipeline.py
 #OpenPoseの実行 → JSONとオーバーレイ動画の生成 → 歩行解析スクリプトの実行
 

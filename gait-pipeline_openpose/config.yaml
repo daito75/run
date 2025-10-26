@@ -1,9 +1,9 @@
-in_video: "/mnt/d/BRLAB/2025/mizuno/done/deta/kaiseki4/concat/3.0m/60cm.mp4"
-out_dir:  "/mnt/d/BRLAB/2025/mizuno/done/deta/kaiseki4/openpose/3.0m/60cm"
+in_video: "/mnt/c/brlab/2025/mizuno/concat/3.0m/60cm.mp4"
+out_dir:  "/mnt/c/brlab/2025/mizuno/openpose/3.0m/60cm"
 
 openpose:
-  bin: "/home/daito/src/openpose/build/examples/openpose/openpose.bin"
-  model_folder: "/home/daito/src/openpose/models"
+  bin: "/home/daito/openpose/build/examples/openpose/openpose.bin"
+  model_folder: "/home/daito/openpose/models"
   model_pose: "BODY_25"
   net_resolution: "656x368"
   render_pose: 2

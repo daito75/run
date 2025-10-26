@@ -1,0 +1,28 @@
+﻿# Python
+__pycache__/
+*.pyc
+.venv/
+.env
+
+# OpenPose outputs / datasets / big binaries
+*.mp4
+*.avi
+*.mov
+*.zip
+*.json
+*.bin
+*.onnx
+*.pt
+*.pth
+*.tflite
+*.log
+openpose/models/
+openpose/**/json/
+**/debug/
+**/tmp/
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

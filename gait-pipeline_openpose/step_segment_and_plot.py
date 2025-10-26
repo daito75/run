@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 """
 python3 step_segment_and_plot.py \
-  --json_dir "/mnt/d/BRLAB/2025/mizuno/done/deta/kaiseki4/openpose/3.0m/60cm/json" \
-  --out_dir  "/mnt/d/BRLAB/2025/mizuno/done/deta/kaiseki4/openpose/3.0m/60cm/gaitevents_steps" \
+  --json_dir "/mnt/c/brlab/2025/mizuno/openpose/3.0m/60cm/json" \
+  --out_dir  "/mnt/c/brlab/2025/mizuno/openpose/3.0m/60cm/gaitevents_steps" \
   --side right \
   --conf_th 0.3 \
   --smooth_win 7 \
@@ -24,242 +24,161 @@ MID_HIP = 8
 R_BIGTOE, R_HEEL = 22, 24
 L_BIGTOE, L_HEEL = 19, 21
 
-def robust_assign_feet_from_jsondir(
-    json_dir,
-    conf_th=0.3,
-    k_swap=3,
-    max_jump_px=50.0,
-    margin=5.0,
-    speed_w=0.5,
-    conf_w=0.0,
-    prefer_consistency=True,
-):
-    """
-    OpenPose JSON ディレクトリから、右足/左足のトラックを頑健に復元し、
-    右左の入れ替わりを抑える。
-
-    Parameters
-    ----------
-    json_dir : str or Path
-        OpenPoseの JSON が入っているディレクトリ。
-    conf_th : float
-        つま先/踵/MID_HIP を「使う」かの信頼度しきい値。
-    k_swap : int
-        「左右スワップの方が自然」という判定が連続で起きた回数の閾値。
-        大きいほど“確信が持てたときだけ”スワップし、誤スワップを抑える。
-        反面、反応は鈍くなる（2～4あたりから調整推奨）。
-    max_jump_px : float
-        1フレームで許容する移動距離(px)。これを超える移動にはペナルティを課す。
-        歩行速度・撮影条件・fpsに応じて 50～120px の範囲で調整が目安。
-    margin : float
-        “そのまま”と“スワップ”のコスト差が僅差の時のブレ止めマージン(px)。
-        ノイズが多い映像ほど 5～10px 程度に上げると安定。
-    speed_w : float
-        速度連続性ペナルティの重み。0なら速度ペナルティなし。
-        0.3～1.0 程度で調整すると暴れを抑制できる。
-    conf_w : float
-        信頼度の低い観測へペナルティを与える重み。
-        0.0～0.5 程度。0のままでもよい（OpenPoseが安定なら0でOK）。
-    prefer_consistency : bool
-        “直前フレームの割当を維持すること”を弱く優先する小バイアスを付ける。
-        True 推奨（Falseでも動作はする）。
-
-    Returns
-    -------
-    dict
-        {
-          "x_r","y_r","x_l","y_l",   # 右/左 足の時系列（NaN を含む）
-          "x_mid","y_mid",           # MID_HIP の時系列（NaN を含む）
-          "frames", "n"              # 参照フレーム名一覧、総フレーム数
-        }
-    """
-    from pathlib import Path
-    import numpy as np, json
-
+# === 右/左のToe+Heel平均をまとめて読む（x_r, x_l, x_mid を返す） ===
+def load_both_feet_from_json(json_dir, conf_th=0.3):
     json_dir = Path(json_dir)
     files = sorted(json_dir.glob("*.json"))
     if not files:
         raise SystemExit(f"[ERR] JSONなし: {json_dir}")
 
-    def _avg_foot(pts, toe_idx, heel_idx, th):
-        """つま先/踵のうち、信頼度が閾値以上の点だけ平均して足位置を作る"""
-        toe = pts[toe_idx]; heel = pts[heel_idx]
-        xs, ys, cs = [], [], []
-        if toe[2] >= th:  xs.append(toe[0]); ys.append(toe[1]); cs.append(toe[2])
-        if heel[2] >= th: xs.append(heel[0]); ys.append(heel[1]); cs.append(heel[2])
-        if xs:
-            return float(np.mean(xs)), float(np.mean(ys)), float(np.mean(cs))
-        return np.nan, np.nan, 0.0
-
-    def _dist(a, b):
-        """ユークリッド距離（どちらか NaN を含めば np.inf を返す）"""
-        if np.any(~np.isfinite(a)) or np.any(~np.isfinite(b)):
-            return np.inf
-        return float(np.hypot(a[0] - b[0], a[1] - b[1]))
-
-    def _cost(prev_pos, curr_pos, prev_vel, conf=1.0):
-        """
-        単点の割当コスト：
-         - 位置の移動距離
-         - 大ジャンプ(>max_jump_px)のペナルティ
-         - 速度連続性（前フレーム速度との差）ペナルティ（重み speed_w）
-         - 低信頼度ペナルティ（重み conf_w）
-        """
-        # 位置距離
-        d = _dist(prev_pos, curr_pos)
-        if not np.isfinite(d):
-            return 1e6  # 観測欠損や prev欠損は超高コスト
-
-        # 大ジャンプペナルティ（距離を増幅）
-        if d > max_jump_px:
-            d *= 4.0
-
-        # 速度連続性：v_t = curr - prev_pos
-        if np.all(np.isfinite(prev_pos)) and np.all(np.isfinite(curr_pos)) and np.all(np.isfinite(prev_vel)):
-            v = np.array([curr_pos[0]-prev_pos[0], curr_pos[1]-prev_pos[1]], dtype=float)
-            dv = v - prev_vel
-            d += float(speed_w) * float(np.hypot(dv[0], dv[1]))
-
-        # 信頼度ペナルティ（conf ∈ [0,1] を想定、低いほどペナルティ）
-        if conf_w > 0.0:
-            d += float(conf_w) * (1.0 - float(conf))
-
-        return d
-
-    # 観測の収集 ----------------------------------------------------------
-    obs_r = []  # (x,y,conf)
-    obs_l = []
-    mids  = []  # (x,y,conf)
-
+    xr, yr, xl, yl, xm, ym = [], [], [], [], [], []
     for p in files:
         data = json.loads(p.read_text())
         if not data.get("people"):
-            obs_r.append((np.nan,np.nan,0.0))
-            obs_l.append((np.nan,np.nan,0.0))
-            mids.append((np.nan,np.nan,0.0))
+            xr += [np.nan]; yr += [np.nan]
+            xl += [np.nan]; yl += [np.nan]
+            xm += [np.nan]; ym += [np.nan]
             continue
         pts = np.array(data["people"][0]["pose_keypoints_2d"], dtype=np.float32).reshape(-1,3)
         if pts.shape[0] < 25:
-            obs_r.append((np.nan,np.nan,0.0))
-            obs_l.append((np.nan,np.nan,0.0))
-            mids.append((np.nan,np.nan,0.0))
+            xr += [np.nan]; yr += [np.nan]
+            xl += [np.nan]; yl += [np.nan]
+            xm += [np.nan]; ym += [np.nan]
             continue
 
-        xr, yr, cr = _avg_foot(pts, R_BIGTOE, R_HEEL, conf_th)
-        xl, yl, cl = _avg_foot(pts, L_BIGTOE, L_HEEL, conf_th)
+        def avg_foot(toe_idx, heel_idx):
+            toe, heel = pts[toe_idx], pts[heel_idx]
+            xs, ys = [], []
+            if toe[2]  >= conf_th: xs.append(toe[0]);  ys.append(toe[1])
+            if heel[2] >= conf_th: xs.append(heel[0]); ys.append(heel[1])
+            if xs: return float(np.mean(xs)), float(np.mean(ys))
+            return np.nan, np.nan
+
+        rx, ry = avg_foot(R_BIGTOE, R_HEEL)
+        lx, ly = avg_foot(L_BIGTOE, L_HEEL)
+
         mid = pts[MID_HIP]
-        xm = float(mid[0]) if mid[2] >= conf_th else np.nan
-        ym = float(mid[1]) if mid[2] >= conf_th else np.nan
-        cm = float(mid[2])
+        mx = float(mid[0]) if mid[2] >= conf_th else np.nan
+        my = float(mid[1]) if mid[2] >= conf_th else np.nan
 
-        obs_r.append((xr, yr, cr))
-        obs_l.append((xl, yl, cl))
-        mids.append((xm, ym, cm))
-
-    obs_r = np.array(obs_r, dtype=float)   # shape (N,3)
-    obs_l = np.array(obs_l, dtype=float)
-    mids  = np.array(mids,  dtype=float)
-
-    N = len(files)
-    x_r = np.full(N, np.nan); y_r = np.full(N, np.nan)
-    x_l = np.full(N, np.nan); y_l = np.full(N, np.nan)
-
-    # 初期化：始動フレーム（両足が一応読めた最初のフレーム）を探す
-    t0 = 0
-    while t0 < N and (not np.isfinite(obs_r[t0,0]) or not np.isfinite(obs_l[t0,0])):
-        t0 += 1
-    if t0 == N:
-        # 全欠損なら空で返す
-        return dict(x_r=x_r,y_r=y_r,x_l=x_l,y_l=y_l,
-                    x_mid=mids[:,0], y_mid=mids[:,1],
-                    frames=[p.name for p in files], n=N)
-
-    # 観測ラベルをそのまま採用して開始
-    x_r[t0], y_r[t0] = obs_r[t0,0], obs_r[t0,1]
-    x_l[t0], y_l[t0] = obs_l[t0,0], obs_l[t0,1]
-
-    # 直前速度（最初はゼロベクトル）
-    v_r_prev = np.array([0.0, 0.0], dtype=float)
-    v_l_prev = np.array([0.0, 0.0], dtype=float)
-
-    swap_streak = 0  # 連続で「入れ替え案が有利」のカウント
-
-    for t in range(t0+1, N):
-        r_meas = obs_r[t,:2]; l_meas = obs_l[t,:2]
-        cr, cl = obs_r[t,2], obs_l[t,2]
-        prev_r = np.array([x_r[t-1], y_r[t-1]])
-        prev_l = np.array([x_l[t-1], y_l[t-1]])
-
-        # 直前速度の更新（前フレームの確定位置から）
-        if np.all(np.isfinite(prev_r)) and np.all(np.isfinite([x_r[t-2] if t-2>=0 else np.nan, y_r[t-2] if t-2>=0 else np.nan])):
-            v_r_prev = prev_r - np.array([x_r[t-2], y_r[t-2]])
-        if np.all(np.isfinite(prev_l)) and np.all(np.isfinite([x_l[t-2] if t-2>=0 else np.nan, y_l[t-2] if t-2>=0 else np.nan])):
-            v_l_prev = prev_l - np.array([x_l[t-2], y_l[t-2]])
-
-        # 欠損ケースを先に処理 -------------------------------------------
-        both_nan = not np.isfinite(r_meas[0]) and not np.isfinite(l_meas[0])
-        if both_nan:
-            # 何も観測がない → そのまま NaN
-            continue
-
-        only_r = np.isfinite(r_meas[0]) and (not np.isfinite(l_meas[0]))
-        only_l = np.isfinite(l_meas[0]) and (not np.isfinite(r_meas[0]))
-        if only_r:
-            # 右のみ観測 → 右or左のどちらに繋ぐのが自然かで割当
-            keep_r_cost = _cost(prev_r, r_meas, v_r_prev, conf=cr)
-            swap_l_cost = _cost(prev_l, r_meas, v_l_prev, conf=cr)
-            if swap_l_cost + margin < keep_r_cost:
-                # 左に来た方が自然 → （見かけ上の入れ替え発生中とみなす）
-                x_l[t], y_l[t] = r_meas
-            else:
-                x_r[t], y_r[t] = r_meas
-            continue
-
-        if only_l:
-            keep_l_cost = _cost(prev_l, l_meas, v_l_prev, conf=cl)
-            swap_r_cost = _cost(prev_r, l_meas, v_r_prev, conf=cl)
-            if swap_r_cost + margin < keep_l_cost:
-                x_r[t], y_r[t] = l_meas
-            else:
-                x_l[t], y_l[t] = l_meas
-            continue
-
-        # どちらも観測あり → “そのまま”vs“スワップ”の合計コスト比較 ------
-        cost_keep = (
-            _cost(prev_r, r_meas, v_r_prev, conf=cr) +
-            _cost(prev_l, l_meas, v_l_prev, conf=cl)
-        )
-        cost_swap = (
-            _cost(prev_r, l_meas, v_r_prev, conf=cl) +
-            _cost(prev_l, r_meas, v_l_prev, conf=cr)
-        )
-
-        # 連続優位判定（僅差は margin で無視）
-        if cost_swap + margin < cost_keep:
-            swap_streak += 1
-        else:
-            # 一度でも keep が優位になればリセット
-            swap_streak = 0
-
-        # “直前の割当を維持”の弱いバイアス：微妙な局面でのフリップ抑制
-        if prefer_consistency and abs(cost_swap - cost_keep) < margin:
-            swap_streak = 0
-
-        if swap_streak >= k_swap:
-            # スワップ確定（このフレームのみ）
-            x_r[t], y_r[t] = l_meas
-            x_l[t], y_l[t] = r_meas
-            swap_streak = 0
-        else:
-            # 現状維持
-            x_r[t], y_r[t] = r_meas
-            x_l[t], y_l[t] = l_meas
+        xr.append(rx); yr.append(ry)
+        xl.append(lx); yl.append(ly)
+        xm.append(mx); ym.append(my)
 
     return dict(
-        x_r=x_r, y_r=y_r, x_l=x_l, y_l=y_l,
-        x_mid=mids[:,0], y_mid=mids[:,1],
-        frames=[p.name for p in files], n=N
+        x_r=np.array(xr, dtype=float), y_r=np.array(yr, dtype=float),
+        x_l=np.array(xl, dtype=float), y_l=np.array(yl, dtype=float),
+        x_mid=np.array(xm, dtype=float), y_mid=np.array(ym, dtype=float),
+        n=len(files), frames=[p.name for p in files]
     )
+
+def fix_swaps_by_jump_threshold(
+    x_main: np.ndarray, x_other: np.ndarray,
+    y_main: np.ndarray | None = None, y_other: np.ndarray | None = None,
+    jump_th_px: float = 10.0,
+    margin_px: float = 1.0,
+    mode: str = "swap_if_better",
+):
+    """
+    直前に“採用”した値（prev_ref）との距離で keep/swap を比較する版。
+    これにより 142 で swap したら、143/144 も「swap後の値」を基準に継続評価され、
+    “異常区間が連続する間は連続で swap” できる。
+    """
+    # 出力（採用系列）を作る：最初は main のコピー
+    ax = np.asarray(x_main, dtype=float).copy()
+    use_y = y_main is not None and y_other is not None
+    if use_y:
+        ay = np.asarray(y_main,  dtype=float).copy()
+        xo = np.asarray(x_other, dtype=float)
+        yo = np.asarray(y_other, dtype=float)
+    else:
+        ay = None
+        xo = np.asarray(x_other, dtype=float)
+        yo = None
+
+    n = len(ax)
+    if n == 0:
+        return (ax, ay)
+
+    def dist_xy(px, py, cx, cy):
+        """2D距離（yがNoneなら|Δx|）。どれかNaNならinf。"""
+        if not np.isfinite(px) or not np.isfinite(cx):
+            return np.inf
+        if ay is None:
+            return abs(cx - px)
+        if not np.isfinite(py) or not np.isfinite(cy):
+            return np.inf
+        return float(np.hypot(cx - px, cy - py))
+
+    # prev_ref（直前の“採用”値）のインデックスを探すヘルパ
+    def find_prev_idx(k):
+        i = k - 1
+        while i >= 0:
+            if np.isfinite(ax[i]) and (ay is None or np.isfinite(ay[i])):
+                return i
+            i -= 1
+        return -1
+
+    for t in range(0, n):
+        # t=0 はそのまま（初期値）。欠損ならスキップ。
+        if t == 0:
+            continue
+
+        prev_i = find_prev_idx(t)
+        if prev_i < 0:
+            # まだ prev_ref が決まってない → ここでは何もしない
+            continue
+
+        # prev_ref（直前に採用した値）
+        px = ax[prev_i]
+        py = ay[prev_i] if ay is not None else None
+
+        # いまの観測（元の足 / 逆足）
+        mx = x_main[t]
+        my = y_main[t] if ay is not None else None
+        ox = x_other[t]
+        oy = y_other[t] if ay is not None else None
+
+        # 欠損処理：main が欠損なら、other が十分近ければ other を採用
+        if not np.isfinite(mx) or (ay is not None and not np.isfinite(my)):
+            if mode == "swap_if_better":
+                d_swap = dist_xy(px, py, ox, oy)
+                if d_swap <= (jump_th_px - margin_px):
+                    ax[t] = ox
+                    if ay is not None: ay[t] = oy
+            # drop/keep のときは何もしない（後段の補間に任せる）
+            continue
+
+        # 距離を同じ prev_ref から比較
+        d_keep = dist_xy(px, py, mx, my)
+        d_swap = dist_xy(px, py, ox, oy)
+
+        # 正常なら keep
+        if d_keep <= jump_th_px:
+            ax[t] = mx
+            if ay is not None: ay[t] = my
+            continue
+
+        # ここから“飛び”
+        if mode == "drop":
+            ax[t] = np.nan
+            if ay is not None: ay[t] = np.nan
+            continue
+
+        if mode == "swap_if_better":
+            # 逆足の方が連続的なら採用（marginでヒステリシス）
+            if (d_swap + margin_px) < d_keep:
+                ax[t] = ox
+                if ay is not None: ay[t] = oy
+            else:
+                ax[t] = np.nan
+                if ay is not None: ay[t] = np.nan
+        elif mode == "keep":
+            # 何もしない
+            ax[t] = mx
+            if ay is not None: ay[t] = my
+
+    return (ax, ay)
 
 def load_series_from_json(json_dir, side="right", conf_th=0.3):
     json_dir = Path(json_dir)
@@ -437,26 +356,35 @@ def main():
 
     os.makedirs(args.out_dir, exist_ok=True)
 
-    # robust foot assignment (入れ替わり補正付き)
-    feet = robust_assign_feet_from_jsondir(
-    args.json_dir,
-    conf_th=args.conf_th,
-    k_swap=3,         # ★調整ノブ：2～4 が目安
-    max_jump_px=80.0, # ★調整ノブ：50～120px
-    margin=5.0,       # ★調整ノブ：3～10px
-    speed_w=0.5,      # ★調整ノブ：0.0～1.0（0で無効）
-    conf_w=0.0,       # ★調整ノブ：0.0～0.5（低信頼度ペナルティ）
-    prefer_consistency=True
-)
+    # 読み出し
+    feet = load_both_feet_from_json(args.json_dir, conf_th=args.conf_th)
 
+    # 右脚を補正（x/y両方で判定＆置換）
+    xr_guard, yr_guard = fix_swaps_by_jump_threshold(
+        feet["x_r"], feet["x_l"],
+        feet["y_r"], feet["y_l"],
+        jump_th_px=10.0,
+        margin_px=1.0,
+        mode="swap_if_better"
+    )
+
+    # 左脚も同様に補正
+    xl_guard, yl_guard = fix_swaps_by_jump_threshold(
+        feet["x_l"], feet["x_r"],
+        feet["y_l"], feet["y_r"],
+        jump_th_px=10.0,
+        margin_px=1.0,
+        mode="swap_if_better"
+    )
+
+    # 解析側を選択
     if args.side.lower().startswith("r"):
-        x_foot = feet["x_r"]    
+        x_foot = xr_guard
     else:
-        x_foot = feet["x_l"]
+        x_foot = xl_guard
     x_mid = feet["x_mid"]
 
     relx = x_foot - x_mid  # 右足（or左足）の相対X
-
     # 欠損を補間 → 平滑化
     relx = nan_interp(relx)
     relx_s = moving_avg(relx, args.smooth_win)
